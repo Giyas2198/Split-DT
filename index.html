@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Splitter & Auto-Rename (Jotun Perfect Fix)</title>
+    <!-- Tailwind CSS untuk styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- pdf-lib untuk memproses pemecahan file PDF -->
+    <script src="https://unpkg.com/pdf-lib@1.4.0/dist/pdf-lib.min.js"></script>
+    <!-- pdf.js untuk membaca teks dari halaman PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    </script>
+</head>
+<body class="bg-slate-50 min-h-screen p-6">
+
+    <div class="max-w-4xl mx-auto bg-white shadow-lg rounded-2xl p-6 md:p-8">
+        <h1 class="text-2xl font-bold text-slate-800 mb-2">📄 PDF Splitter & Auto-Rename (Jotun Perfect Fix)</h1>
+        <p class="text-sm text-slate-500 mb-6">Upload file PDF Delivery Ticket. Sistem membaca berdasarkan aturan: DT NO, DELIVER TO, dan Order No.</p>
+
+        <!-- 1. Form Upload -->
+        <div class="mb-6">
+            <label class="block text-sm font-medium text-slate-700 mb-2">Upload File Scan (PDF):</label>
+            <input type="file" id="pdfFile" accept="application/pdf" 
+                class="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer border border-slate-200 rounded-xl p-2">
+            <p id="fileInfo" class="text-xs text-slate-400 mt-2 hidden">Total Halaman: <span id="totalPages" class="font-bold text-slate-600">0</span></p>
+        </div>
+
+        <!-- 2. Bagian Aturan Split & Rename -->
+        <div id="splitSection" class="mb-6 hidden">
+            <div class="flex justify-between items-center mb-3">
+                <h2 class="text-md font-semibold text-slate-700">Atur Split & Nama Baru (Auto-Detected):</h2>
+                <button onclick="addRow()" class="bg-emerald-50 text-emerald-600 hover:bg-emerald-100 font-medium text-xs px-3 py-1.5 rounded-lg transition">+ Tambah Bagian</button>
+            </div>
+
+            <div id="splitRowsContainer" class="space-y-3">
+                <!-- Baris dinamis akan dimasukkan lewat JS di sini -->
+            </div>
+        </div>
+
+        <!-- 3. Tombol Save -->
+        <button id="saveBtn" onclick="processAndSave()" disabled 
+            class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-semibold py-3 px-4 rounded-xl transition shadow-sm cursor-pointer disabled:cursor-not-allowed">
+            Proses & Download File
+        </button>
+    </div>
+
+    <script>
+        let loadedPdfBytes = null;
+        let pdfDoc = null;
+        let pdfJsDoc = null;
+        let totalPagesCount = 0;
+
+        const fileInput = document.getElementById('pdfFile');
+        const fileInfo = document.getElementById('fileInfo');
+        const totalPagesSpan = document.getElementById('totalPages');
+        const splitSection = document.getElementById('splitSection');
+        const splitRowsContainer = document.getElementById('splitRowsContainer');
+        const saveBtn = document.getElementById('saveBtn');
+
+        // Event saat file dipilih
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async function() {
+                loadedPdfBytes = new Uint8Array(reader.result);
+                try {
+                    pdfDoc = await PDFLib.PDFDocument.load(loadedPdfBytes);
+                    totalPagesCount = pdfDoc.getPageCount();
+
+                    const loadingTask = pdfjsLib.getDocument({ data: loadedPdfBytes });
+                    pdfJsDoc = await loadingTask.promise;
+
+                    totalPagesSpan.innerText = totalPagesCount;
+                    fileInfo.classList.remove('hidden');
+                    splitSection.classList.remove('hidden');
+                    saveBtn.disabled = false;
+
+                    splitRowsContainer.innerHTML = ' ';
+                    
+                    for (let i = 1; i <= totalPagesCount; i++) {
+                        let detectedData = await extractJotunMetadata(i);
+                        let formattedName = `${detectedData.dtNo} - ${detectedData.deliverTo} - ${detectedData.orderNo}`;
+                        addRow(formattedName, i, i);
+                    }
+
+                } catch (err) {
+                    alert('Gagal membaca file PDF. Pastikan file valid.');
+                    console.error(err);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // Fungsi ekstraksi dengan filter ketat posisi kiri (Deliver To)
+        async function extractJotunMetadata(pageNum) {
+            let result = {
+                dtNo: 'DT_UNKNOWN',
+                deliverTo: 'CUSTOMER_UNKNOWN',
+                orderNo: 'ORDER_UNKNOWN'
+            };
+
+            try {
+                const page = await pdfJsDoc.getPage(pageNum);
+                const textContent = await page.getTextContent();
+                
+                const items = textContent.items.map(item => ({
+                    str: item.str.trim(),
+                    x: item.transform[4],
+                    y: item.transform[5]
+                })).filter(i => i.str.length > 0);
+
+                // Urutkan dari atas ke bawah (Y besar ke kecil)
+                items.sort((a, b) => {
+                    if (Math.abs(b.y - a.y) > 4) {
+                        return b.y - a.y;
+                    }
+                    return a.x - b.x;
+                });
+
+                // 1. ATURAN DT NO: Cari tulisan "DT NO"
+                let dtIdx = items.findIndex(i => i.str.toUpperCase().includes('DT NO'));
+                if (dtIdx !== -1) {
+                    for (let k = dtIdx + 1; k < Math.min(dtIdx + 4, items.length); k++) {
+                        let matchNum = items[k].str.match(/\b(\d{7,10})\b/);
+                        if (matchNum) {
+                            result.dtNo = matchNum[1];
+                            break;
+                        }
+                    }
+                }
+                if (result.dtNo === 'DT_UNKNOWN') {
+                    let fullStr = items.map(i => i.str).join(' ');
+                    let generalDt = fullStr.match(/\b(1[5-6]\d{6,7})\b/);
+                    if (generalDt) result.dtNo = generalDt[1];
+                }
+
+                // 2. ATURAN DELIVER TO: Cari kata "DELIVER TO" strictly di sebelah kiri (X < 250)
+                let deliverIdx = items.findIndex(i => {
+                    let s = i.str.toUpperCase();
+                    return s.includes('DELIVER TO') && i.x < 250;
+                });
+
+                if (deliverIdx !== -1) {
+                    let targetY = items[deliverIdx].y;
+                    let storeCandidates = [];
+                    
+                    // Cari teks di bawah "DELIVER TO" yang berada di sisi kiri
+                    for (let k = 0; k < items.length; k++) {
+                        // Harus berada di bawah label DELIVER TO (Y lebih kecil) dan di kolom kiri (X < 250)
+                        if (items[k].y < targetY && items[k].y > targetY - 60 && items[k].x < 250) {
+                            let text = items[k].str;
+                            // Lewati jika mengandung kata-kata penanda alamat atau label
+                            if (/^(DELIVER|INVOICE|JL\.|JALAN|KAB\.|KOTA|KEC|BAPAK|\+62|08)/i.test(text)) {
+                                continue;
+                            }
+                            if (text.length > 2) {
+                                storeCandidates.push(text);
+                                break; // Ambil baris nama toko pertama yang valid
+                            }
+                        }
+                    }
+                    if (storeCandidates.length > 0) {
+                        result.deliverTo = storeCandidates[0];
+                    }
+                }
+
+                // 3. ATURAN ORDER NO: Cari tulisan "Order No"
+                let orderIdx = items.findIndex(i => i.str.toUpperCase().includes('ORDER NO'));
+                if (orderIdx !== -1) {
+                    for (let k = orderIdx; k < Math.min(orderIdx + 6, items.length); k++) {
+                        let matchW = items[k].str.match(/\b(W\d{7,8})\b/i);
+                        if (matchW) {
+                            result.orderNo = matchW[1].toUpperCase();
+                            break;
+                        }
+                    }
+                }
+                if (result.orderNo === 'ORDER_UNKNOWN') {
+                    let fullStr = items.map(i => i.str).join(' ');
+                    let generalW = fullStr.match(/\b(W\d{7,8})\b/i);
+                    if (generalW) result.orderNo = generalW[1].toUpperCase();
+                }
+
+            } catch (err) {
+                console.error(`Gagal ekstrak halaman ${pageNum}:`, err);
+            }
+
+            return result;
+        }
+
+        // Fungsi menambah baris split & rename baru
+        function addRow(defaultName = '', defaultStart = 1, defaultEnd = 1) {
+            const rowDiv = document.createElement('div');
+            rowDiv.className = 'flex flex-col sm:flex-row gap-2 items-center bg-slate-50 border border-slate-200 p-3 rounded-xl';
+            
+            rowDiv.innerHTML = `
+                <div class="flex-1 w-full">
+                    <label class="text-xs text-slate-500 mb-1 block">Format Nama File (DT - Toko - Order):</label>
+                    <input type="text" value="${defaultName}" class="rename-input w-full text-sm border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <div class="w-full sm:w-20">
+                    <label class="text-xs text-slate-500 mb-1 block">Dari Hal:</label>
+                    <input type="number" min="1" max="${totalPagesCount}" value="${defaultStart}" class="start-page w-full text-sm border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <div class="w-full sm:w-20">
+                    <label class="text-xs text-slate-500 mb-1 block">Sampai Hal:</label>
+                    <input type="number" min="1" max="${totalPagesCount}" value="${defaultEnd}" class="end-page w-full text-sm border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
+                </div>
+                <div class="flex items-end h-full pt-5">
+                    <button onclick="this.parentElement.parentElement.remove()" class="text-rose-500 hover:text-rose-700 p-2 rounded-lg text-sm font-bold" title="Hapus baris">✕</button>
+                </div>
+            `;
+            splitRowsContainer.appendChild(rowDiv);
+        }
+
+        // Fungsi utama saat tombol "Proses & Download" diklik
+        async function processAndSave() {
+            if (!pdfDoc) return;
+
+            const rows = splitRowsContainer.querySelectorAll('div.flex-col');
+            if (rows.length === 0) {
+                alert('Minimal tentukan satu aturan split!');
+                return;
+            }
+
+            saveBtn.disabled = true;
+            saveBtn.innerText = 'Memproses...';
+
+            try {
+                for (let i = 0; i < rows.length; i++) {
+                    const row = rows[i];
+                    let customName = row.querySelector('.rename-input').value.trim() || `dokumen_${i+1}`;
+                    let startPage = parseInt(row.querySelector('.start-page').value);
+                    let endPage = parseInt(row.querySelector('.end-page').value);
+
+                    if (isNaN(startPage) || isNaN(endPage) || startPage < 1 || endPage > totalPagesCount || startPage > endPage) {
+                        alert(`Rentang halaman pada baris "${customName}" tidak valid!`);
+                        saveBtn.disabled = false;
+                        saveBtn.innerText = 'Proses & Download File';
+                        return;
+                    }
+
+                    const newPdf = await PDFLib.PDFDocument.create();
+                    const rangeIndexes = [];
+                    for (let p = startPage - 1; p <= endPage - 1; p++) {
+                        rangeIndexes.push(p);
+                    }
+
+                    const copiedPages = await newPdf.copyPages(pdfDoc, rangeIndexes);
+                    copiedPages.forEach((page) => newPdf.addPage(page));
+
+                    const pdfBytes = await newPdf.save();
+                    let safeFileName = customName.replace(/[<>:"/\\|?*]/g, '');
+
+                    downloadBlob(pdfBytes, `${safeFileName}.pdf`, 'application/pdf');
+                }
+                
+                alert('Berhasil! File PDF telah di-split dan di-rename otomatis.');
+            } catch (err) {
+                console.error(err);
+                alert('Terjadi kesalahan saat memproses PDF.');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerText = 'Proses & Download File';
+            }
+        }
+
+        function downloadBlob(data, filename, mimeType) {
+            const blob = new Blob([data], { type: mimeType });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }
+    </script>
+</body>
+</html>
